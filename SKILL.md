@@ -1,14 +1,11 @@
 ---
-name: water-body-extraction
-display_name: 水体提取工具
-version: 0.1.0
-author: ruiduobao
-license: MIT-0
-description: |
-  Automatic water body extraction from multi-band satellite imagery using NDWI and MNDWI indices.
+description: 'Automatic water body extraction from multi-band satellite imagery using
+  NDWI and MNDWI indices.
+
   Supports Landsat 8/9 and Sentinel-2, Otsu threshold optimization, and vector output.
-runtime: python>=3.8
-tags: [gis, remote-sensing, water, ndwi, mndwi, landsat, sentinel]
+
+  '
+name: water-body-extraction
 ---
 
 # Water Body Extraction
@@ -36,7 +33,7 @@ Automatically extract water bodies from satellite imagery using spectral indices
 
 ### Single image extraction
 ```bash
-python scripts/water-body-extraction.py extract \
+python scripts\water-body-extraction.py extract \
   --input image.tif \
   --sensor landsat8 \
   --index mndwi \
@@ -46,7 +43,7 @@ python scripts/water-body-extraction.py extract \
 
 ### Otsu threshold optimization
 ```bash
-python scripts/water-body-extraction.py threshold \
+python scripts\water-body-extraction.py threshold \
   --input image.tif \
   --sensor landsat8 \
   --index ndwi \
@@ -55,7 +52,7 @@ python scripts/water-body-extraction.py threshold \
 
 ### Batch processing
 ```bash
-python scripts/water-body-extraction.py batch \
+python scripts\water-body-extraction.py batch \
   --input-dir ./images/ \
   --sensor sentinel2 \
   --index mndwi \
@@ -123,7 +120,7 @@ Clouds and cloud shadows cause false water detections. Best practices:
 Remove small noise polygons with `--min-area`:
 
 ```bash
-python scripts/water-body-extraction.py extract \
+python scripts\water-body-extraction.py extract \
   --input image.tif --sensor landsat8 --index mndwi \
   --output water_mask.tif --vector water_boundary.geojson \
   --min-area 1000
@@ -144,7 +141,7 @@ For rasters >1 GB:
 In addition to GeoJSON, Shapefile and GeoPackage output are supported:
 
 ```bash
-python scripts/water-body-extraction.py extract \
+python scripts\water-body-extraction.py extract \
   --input image.tif --sensor landsat8 --index mndwi \
   --output water_mask.tif --vector water_boundary.gpkg --vector-format gpkg
 ```
@@ -282,7 +279,7 @@ ogr2ogr -f PostgreSQL PG:"dbname=gis_db" water.geojson -nln water_bodies
 
 ### 单幅影像提取
 ```bash
-python scripts/water-body-extraction.py extract \
+python scripts\water-body-extraction.py extract \
   --input image.tif \
   --sensor landsat8 \
   --index mndwi \
@@ -292,7 +289,7 @@ python scripts/water-body-extraction.py extract \
 
 ### Otsu 阈值优化
 ```bash
-python scripts/water-body-extraction.py threshold \
+python scripts\water-body-extraction.py threshold \
   --input image.tif \
   --sensor landsat8 \
   --index ndwi \
@@ -301,7 +298,7 @@ python scripts/water-body-extraction.py threshold \
 
 ### 批量处理
 ```bash
-python scripts/water-body-extraction.py batch \
+python scripts\water-body-extraction.py batch \
   --input-dir ./images/ \
   --sensor sentinel2 \
   --index mndwi \
@@ -369,7 +366,7 @@ tqdm>=4.64.0
 使用 `--min-area` 去除小面积噪声多边形：
 
 ```bash
-python scripts/water-body-extraction.py extract \
+python scripts\water-body-extraction.py extract \
   --input image.tif --sensor landsat8 --index mndwi \
   --output water_mask.tif --vector water_boundary.geojson \
   --min-area 1000
@@ -390,7 +387,7 @@ python scripts/water-body-extraction.py extract \
 除 GeoJSON 外，还支持 Shapefile 和 GeoPackage 输出：
 
 ```bash
-python scripts/water-body-extraction.py extract \
+python scripts\water-body-extraction.py extract \
   --input image.tif --sensor landsat8 --index mndwi \
   --output water_mask.tif --vector water_boundary.gpkg --vector-format gpkg
 ```

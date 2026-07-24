@@ -1,0 +1,4 @@
+description: Automatic water body extraction from multi-band satellite imagery using
+  NDWI and MNDWI indices
+display_name: Water Body Extraction
+name: water-body-extraction
