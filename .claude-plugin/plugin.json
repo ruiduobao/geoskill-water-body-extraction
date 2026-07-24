@@ -1,0 +1,9 @@
+{
+  "name": "water-body-extraction",
+  "description": "GIS skill for water-body-extraction",
+  "version": "0.1.0",
+  "author": "ruiduobao",
+  "skills": [
+    "water-body-extraction"
+  ]
+}
