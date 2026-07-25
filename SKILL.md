@@ -210,7 +210,7 @@ Local raster processing — uses pre-downloaded satellite imagery. No external A
 ### Batch Processing with Shell Loop
 ```bash
 for img in scenes/*.tif; do
-  python scripts/water_extraction.py extract     --input "$img" --index MNDWI --sensor sentinel2     --output "water_$(basename $img)"
+  python scripts\water-body-extraction.py extract     --input "$img" --index MNDWI --sensor sentinel2     --output "water_$(basename $img)"
   sleep 1
 done
 ```
@@ -232,7 +232,7 @@ jobs:
           python-version: '3.11'
       - run: pip install numpy rasterio scipy
       - run: |
-          python scripts/water_extraction.py extract \
+          python scripts\water-body-extraction.py extract \
             --input data/latest_scene.tif \
             --index MNDWI --sensor sentinel2 --otsu \
             --output data/water_latest.tif
@@ -241,7 +241,7 @@ jobs:
 ### Vector Export & PostGIS Import
 ```bash
 # Extract water and export as GeoJSON vector
-python scripts/water_extraction.py extract   --input scene.tif --index MNDWI --vector --output water.geojson
+python scripts\water-body-extraction.py extract   --input scene.tif --index MNDWI --vector --output water.geojson
 
 # Import to PostGIS
 ogr2ogr -f PostgreSQL PG:"dbname=gis_db" water.geojson -nln water_bodies
