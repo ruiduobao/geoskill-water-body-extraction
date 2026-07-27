@@ -1,11 +1,6 @@
 ---
-description: 'Automatic water body extraction from multi-band satellite imagery using
-  NDWI and MNDWI indices.
-
-  Supports Landsat 8/9 and Sentinel-2, Otsu threshold optimization, and vector output.
-
-  '
 name: water-body-extraction
+description: 'Automatic water body extraction from multi-band satellite imagery using description: 'Automatic water body extraction from multi-band satellite imagery using NDWI and MNDWI indices.  Supports Landsat 8/9 and Sentinel-2, Otsu threshold optimization, and vector output.  '
 ---
 
 # Water Body Extraction
@@ -40,6 +35,23 @@ python scripts\water-body-extraction.py extract \
   --output water_mask.tif \
   --vector water_boundary.geojson
 ```
+
+### NEW (v0.2.0): one-shot by place name
+```bash
+# Provide just --place; the skill auto-fetches a Sentinel-2 scene for you
+python scripts\water-body-extraction.py extract \
+  --place "成都市锦江区" \
+  --preset water-urban \
+  --start-date 2023-06-01 --end-date 2023-09-30 --max-cloud 20 \
+  --output water_mask.tif \
+  --vector water_boundary.geojson \
+  --qa
+```
+
+Available presets:
+- `water-urban` (Sentinel-2 + MNDWI)
+- `water-rural` (Sentinel-2 + NDWI)
+- `water-landsat` (Landsat 8/9 + MNDWI)
 
 ### Otsu threshold optimization
 ```bash
