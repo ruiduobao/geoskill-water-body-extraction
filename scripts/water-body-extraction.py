@@ -19,6 +19,16 @@ import os
 import sys
 from pathlib import Path
 
+# Phase 1+ (2026-07-26): vendored _geoskill_core for AOI resolution
+_SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_GEOSKILL_CORE_DIR = os.path.join(_SKILL_DIR, "_geoskill_core")
+if os.path.isdir(_GEOSKILL_CORE_DIR) and _GEOSKILL_CORE_DIR not in sys.path:
+    sys.path.insert(0, _GEOSKILL_CORE_DIR)
+try:
+    import aoi as _geoskill_aoi  # noqa: E402
+except Exception:  # noqa: BLE001
+    _geoskill_aoi = None
+
 try:
     import numpy as np
 except ImportError:
@@ -44,6 +54,70 @@ except ImportError:
         return iterable
 
 
+# ============================================================
+# Place resolver (v0.2.0 — batch2 upgrade)
+# ============================================================
+
+def _resolve_place(place: str, buffer_deg: float = None):
+    """Resolve a Chinese place name to bbox + centroid.
+
+    buffer_deg:
+        None (default) → auto buffer by admin-level (省 5° / 市 0.6° / 区 0.15° / 县 0.4°).
+        float → user override (e.g. 0.3 for a 30km square).
+
+    Phase 0+ (2026-07-26): 委托给 vendored _geoskill_core.aoi。
+    老 _shared/place_resolver.py 路径已删，回退到 legacy Nominatim。
+    """
+    import os as _os
+    import sys as _sys
+
+    # Auto buffer by admin-level heuristic
+    if buffer_deg is None:
+        name = (place or "").strip()
+        if name.endswith(("省", "自治区")):
+            buffer_deg = 5.0
+        elif name.endswith("市"):
+            buffer_deg = 0.6
+        elif name.endswith("区"):
+            buffer_deg = 0.15
+        elif name.endswith(("县", "旗")):
+            buffer_deg = 0.4
+        else:
+            buffer_deg = 0.3
+
+    # 1. 优先 vendored _geoskill_core.aoi（顶部 import _geoskill_aoi）
+    if _geoskill_aoi is not None:
+        try:
+            m = _geoskill_aoi.resolve_place(place, buffer_deg=buffer_deg, allow_nominatim=True, use_cache=False)
+            return (m.bbox_wgs84[0], m.bbox_wgs84[1], m.bbox_wgs84[2], m.bbox_wgs84[3])
+        except Exception:
+            pass
+    # 2. 兜底：legay Nominatim 直调（_shared 已删，但保留 fallback）
+    try:
+        import requests  # noqa: F401
+        from urllib.parse import urlencode
+        req_url = "https://nominatim.openstreetmap.org/search?" + urlencode({
+            "q": place, "format": "jsonv2", "limit": 1, "addressdetails": 0,
+        })
+        r = requests.get(req_url, headers={"User-Agent": "water-body-extraction/0.1.0"}, timeout=15)
+        data = r.json() or []
+        if not data:
+            raise ValueError(f"Nominatim returned empty for {place!r}")
+        bb = data[0].get("boundingbox") or []
+        if len(bb) != 4:
+            raise ValueError(f"Nominatim bbox malformed for {place!r}")
+        # boundingbox: [south, north, west, east] → return (W, S, E, N)
+        s, n, w, e = float(bb[0]), float(bb[1]), float(bb[2]), float(bb[3])
+        # 按 buffer_deg 微调（bbox 已经合理时几乎无变化）
+        cx = (w + e) / 2.0
+        cy = (s + n) / 2.0
+        w, s = cx - buffer_deg, cy - buffer_deg
+        e, n = cx + buffer_deg, cy + buffer_deg
+        return (w, s, e, n)
+    except Exception as e:
+        raise ValueError(f"无法解析地点 '{place}': {e}")
+
+
 # ─── Band configurations ────────────────────────────────────────────────────
 
 SENSOR_BANDS = {
@@ -55,6 +129,25 @@ SENSOR_BANDS = {
 VALID_SENSORS = list(SENSOR_BANDS.keys())
 VALID_INDEXES = ["ndwi", "mndwi"]
 VALID_METHODS = ["otsu", "manual"]
+
+# Presets (v0.2.0)
+PRESETS = {
+    "water-urban": {
+        "sensor": "sentinel2",
+        "index": "mndwi",
+        "description": "城市/郊区水体提取（Sentinel-2 + MNDWI）",
+    },
+    "water-rural": {
+        "sensor": "sentinel2",
+        "index": "ndwi",
+        "description": "自然景观水体提取（Sentinel-2 + NDWI）",
+    },
+    "water-landsat": {
+        "sensor": "landsat8",
+        "index": "mndwi",
+        "description": "Landsat 8/9 水体提取（MNDWI）",
+    },
+}
 
 
 # ─── Utility functions ───────────────────────────────────────────────────────
@@ -146,18 +239,53 @@ def otsu_threshold(image: np.ndarray) -> float:
         return 0.0
 
 
-def vectorize_mask(mask: np.ndarray, transform: Affine, crs, output_path: str) -> dict:
-    """Convert binary mask to vector GeoJSON."""
+def _vector_driver(fmt: str) -> str:
+    """Map a --format value to a fiona driver name."""
+    fmt = (fmt or "geojson").lower()
+    if fmt == "geojson":
+        return "GeoJSON"
+    if fmt == "shapefile":
+        return "ESRI Shapefile"
+    raise ValueError(f"Unsupported vector format: {fmt!r}")
+
+
+def vectorize_mask(
+    mask: np.ndarray,
+    transform: Affine,
+    crs,
+    output_path: str,
+    fmt: str = "geojson",
+) -> dict:
+    """Convert binary mask to vector polygons.
+
+    Parameters
+    ----------
+    fmt : str
+        One of "geojson" or "shapefile". The driver's default extension
+        is appended to ``output_path`` if the supplied path does not
+        already carry it.
+    """
     try:
         from shapely.geometry import shape, mapping
         import fiona
-        from fiona.crs import from_epsg
     except ImportError as e:
         print(f"WARNING: Vector output requires shapely and fiona: {e}")
         return {}
 
     try:
         from rasterio import features
+
+        driver = _vector_driver(fmt)
+
+        # Ensure the output path carries the right extension
+        ext_for_driver = {
+            "GeoJSON": ".geojson",
+            "ESRI Shapefile": ".shp",
+        }
+        wanted_ext = ext_for_driver[driver]
+        if not output_path.lower().endswith(wanted_ext):
+            base = os.path.splitext(output_path)[0]
+            output_path = base + wanted_ext
 
         shapes = features.shapes(mask.astype(np.uint8), transform=transform)
         geoms = []
@@ -169,20 +297,24 @@ def vectorize_mask(mask: np.ndarray, transform: Affine, crs, output_path: str) -
             print("WARNING: No water bodies found for vectorization.")
             return {}
 
-        # Write GeoJSON
+        # Shapefiles impose stricter limits on field names → use short ones
         schema = {
             "geometry": "Polygon",
             "properties": {"id": "int", "area": "float"},
         }
 
-        with fiona.open(output_path, "w", driver="GeoJSON", crs=crs, schema=schema) as dst:
+        with fiona.open(output_path, "w", driver=driver, crs=crs, schema=schema) as dst:
             for i, geom in enumerate(geoms):
                 dst.write({
                     "geometry": mapping(geom),
                     "properties": {"id": i, "area": geom.area},
                 })
 
-        return {"vector_features": len(geoms), "output": output_path}
+        return {
+            "vector_features": len(geoms),
+            "output": output_path,
+            "vector_format": fmt,
+        }
 
     except Exception as e:
         print(f"WARNING: Vectorization failed: {e}")
@@ -208,6 +340,7 @@ def process_single_image(
     output_path: str = None,
     vector_path: str = None,
     method: str = "otsu",
+    vector_format: str = "geojson",
 ) -> dict:
     """Process a single image and extract water bodies."""
 
@@ -269,18 +402,80 @@ def process_single_image(
 
     # Vectorize
     if vector_path:
-        vec_stats = vectorize_mask(water_mask, transform, crs, vector_path)
+        vec_stats = vectorize_mask(water_mask, transform, crs, vector_path,
+                                    fmt=vector_format)
         stats.update(vec_stats)
         if vec_stats:
-            print(f"  Vector saved: {vector_path}")
+            print(f"  Vector saved: {vec_stats.get('output', vector_path)}")
 
     return stats
 
 
 def cmd_extract(args):
     """Handle extract subcommand."""
+    # Apply preset
+    if getattr(args, "preset", None):
+        ps = PRESETS[args.preset]
+        print(f"[preset] {args.preset}: {ps['description']}")
+        if args.sensor == "landsat8" and ps["sensor"]:
+            args.sensor = ps["sensor"]
+        if args.index == "ndwi" and ps["index"]:
+            args.index = ps["index"]
+
+    # Resolve place
+    place_info = None
+    if getattr(args, "place", None):
+        try:
+            place_info = _resolve_place(args.place, buffer_deg=getattr(args, "place_buffer_deg", None))
+            print(f"[place] {args.place} -> {place_info.resolved_name} (bbox={place_info.bbox})")
+        except ValueError as e:
+            print(f"WARN: {e}")
+            place_info = None
+
+    # Auto-prep (v0.2.0): when --place is given but no --input, fetch a scene
+    auto_fetched = None
+    if place_info is not None and not getattr(args, "input", None) and not getattr(args, "no_auto_fetch", False):
+        try:
+            import sys as _sys
+            import os as _os
+            here = _os.path.dirname(_os.path.abspath(__file__))
+            shared = _os.path.normpath(_os.path.join(here, "..", "..", "_shared"))
+            if shared not in _sys.path:
+                _sys.path.insert(0, shared)
+            from auto_data_prep import fetch_landsat_scene  # type: ignore
+
+            start = getattr(args, "start_date", None) or "2023-06-01"
+            end = getattr(args, "end_date", None) or "2023-09-30"
+            max_cloud = getattr(args, "max_cloud", 20.0)
+            scene_sensor = args.sensor
+            if scene_sensor == "sentinel2":
+                bands = ["red", "green", "blue", "nir", "swir16", "swir22"]
+            else:
+                bands = ["red", "green", "blue", "nir08", "swir16", "swir22"]
+            out_dir = _os.path.join(
+                _os.getcwd(),
+                f"water_body_{place_info.code or 'place'}_{start}_{end}",
+            )
+            print(f"[auto-prep] fetching {scene_sensor} scene for {args.place} ({start}..{end}, cloud<{max_cloud}%)...")
+            tif = fetch_landsat_scene(
+                place=args.place, start=start, end=end,
+                max_cloud=max_cloud, bands=bands, output_dir=out_dir,
+            )
+            args.input = tif
+            auto_fetched = tif
+            print(f"[auto-prep] fetched: {tif}")
+        except Exception as e:
+            print(f"[auto-prep] WARN: auto fetch failed ({e}); falling back to --input")
+
     sensor = validate_sensor(args.sensor)
     index = validate_index(args.index)
+
+    if not args.input:
+        if getattr(args, "place", None):
+            print(f"ERROR: --place '{args.place}' was given but auto-fetch failed and no --input. Provide --input explicitly or check network.")
+        else:
+            print("ERROR: --input is required (or use --place to auto-fetch).")
+        sys.exit(1)
 
     if not os.path.isfile(args.input):
         print(f"ERROR: Input file not found: {args.input}")
@@ -301,13 +496,60 @@ def cmd_extract(args):
         output_path=args.output,
         vector_path=args.vector,
         method=method,
+        vector_format=getattr(args, "format", "geojson"),
     )
+
+    # Augment with place / preset info
+    if place_info is not None:
+        stats["place"] = args.place
+        stats["place_info"] = place_info.to_dict()
+    if getattr(args, "preset", None):
+        stats["preset"] = args.preset
 
     print(f"\nResults:")
     print(f"  Water pixels: {stats['water_pixels']:,} ({stats['water_percentage']:.2f}%)")
 
     if args.json:
-        print(json.dumps(stats, indent=2))
+        print(json.dumps(stats, indent=2, ensure_ascii=False))
+
+    # QA summary (v0.2.0)
+    if getattr(args, "qa", False) and args.output:
+        qa_path = os.path.splitext(args.output)[0] + ".qa.json"
+
+        def _coerce(v):
+            """Make values JSON-serializable (numpy float → python float)."""
+            try:
+                import numpy as _np
+                if isinstance(v, _np.floating):
+                    return float(v)
+                if isinstance(v, _np.integer):
+                    return int(v)
+                if isinstance(v, _np.ndarray):
+                    return v.tolist()
+            except Exception:
+                pass
+            return v
+
+        qa = {
+            "input": args.input,
+            "sensor": sensor,
+            "index": index,
+            "method": method,
+            "threshold": _coerce(stats.get("threshold")),
+            "water_pixels": _coerce(stats.get("water_pixels")),
+            "water_percentage": _coerce(stats.get("water_percentage")),
+            "total_pixels": _coerce(stats.get("total_pixels")),
+            "output_raster": stats.get("output_raster"),
+            "output_vector": args.vector if args.vector else None,
+            "vector_features": _coerce(stats.get("vector_features", 0)),
+            "place": getattr(args, "place", None),
+            "place_info": place_info.to_dict() if place_info is not None else None,
+            "preset": getattr(args, "preset", None),
+            "auto_fetched": auto_fetched,
+        }
+        with open(qa_path, "w", encoding="utf-8") as f:
+            json.dump(qa, f, indent=2, ensure_ascii=False)
+        print(f"  QA summary: {qa_path}")
 
 
 def cmd_batch(args):
@@ -336,12 +578,14 @@ def cmd_batch(args):
     print(f"Found {len(tif_files)} images to process")
 
     all_stats = []
+    vector_format = getattr(args, "format", "geojson")
+    ext = ".shp" if vector_format == "shapefile" else ".geojson"
     for tif_file in tqdm(tif_files, desc="Processing"):
         stem = tif_file.stem
         output_path = os.path.join(args.output_dir, f"{stem}_water_mask.tif")
         vector_path = None
         if args.vector_dir:
-            vector_path = os.path.join(args.vector_dir, f"{stem}_water.geojson")
+            vector_path = os.path.join(args.vector_dir, f"{stem}_water{ext}")
 
         try:
             stats = process_single_image(
@@ -352,6 +596,7 @@ def cmd_batch(args):
                 output_path=output_path,
                 vector_path=vector_path,
                 method=getattr(args, "method", "otsu"),
+                vector_format=vector_format,
             )
             all_stats.append(stats)
         except Exception as e:
@@ -440,10 +685,10 @@ Examples:
 
     # ── extract ──
     p_extract = subparsers.add_parser("extract", help="Extract water bodies from a single image")
-    p_extract.add_argument("-i", "--input", required=True, help="Input multi-band GeoTIFF path")
-    p_extract.add_argument("--sensor", required=True, choices=VALID_SENSORS,
-                           help="Sensor type")
-    p_extract.add_argument("--index", required=True, choices=VALID_INDEXES,
+    p_extract.add_argument("-i", "--input", help="Input multi-band GeoTIFF path (auto-fetched if --place given)")
+    p_extract.add_argument("--sensor", default="landsat8", choices=VALID_SENSORS,
+                           help="Sensor type (default: landsat8)")
+    p_extract.add_argument("--index", default="ndwi", choices=VALID_INDEXES,
                            help="Water index to compute (ndwi or mndwi)")
     p_extract.add_argument("-o", "--output", help="Output raster mask path")
     p_extract.add_argument("--vector", help="Output vector GeoJSON path")
@@ -451,7 +696,24 @@ Examples:
                            help="Manual threshold (default: Otsu auto)")
     p_extract.add_argument("--method", default="otsu", choices=VALID_METHODS,
                            help="Threshold method (default: otsu)")
+    p_extract.add_argument("--place", help="Place name; auto-fetches a scene if --input not provided")
+    p_extract.add_argument("--place-buffer-deg", type=float, default=None,
+                           help="Buffer around resolved place point (degrees). Default: auto by "
+                                "admin-level (省 5° / 市 0.6° / 区 0.15° / 县 0.4°).")
+    p_extract.add_argument("--start-date", help="Start date (YYYY-MM-DD) for auto-fetch (default: 2023-06-01)")
+    p_extract.add_argument("--end-date", help="End date (YYYY-MM-DD) for auto-fetch (default: 2023-09-30)")
+    p_extract.add_argument("--max-cloud", type=float, default=20.0, help="Max cloud cover %% for auto-fetch (default: 20)")
+    p_extract.add_argument("--no-auto-fetch", action="store_true",
+                           help="Disable auto-fetch; require --input explicitly")
+    p_extract.add_argument("--preset", choices=list(PRESETS.keys()),
+                           help="Use a preset (water-urban, water-rural, water-landsat)")
+    p_extract.add_argument("--min-area", type=float, default=0,
+                           help="Filter polygons smaller than N map units (m^2 for projected)")
+    p_extract.add_argument("--format", choices=["geojson", "shapefile"], default="geojson",
+                           help="Vector output format when --vector is set "
+                                "(default: geojson). shapefile writes a .shp + sidecars.")
     p_extract.add_argument("--json", action="store_true", help="Output statistics as JSON")
+    p_extract.add_argument("--qa", action="store_true", help="Write QA summary JSON next to the output")
     p_extract.set_defaults(func=cmd_extract)
 
     # ── batch ──
@@ -464,6 +726,9 @@ Examples:
     p_batch.add_argument("--threshold", type=float, default=None, help="Manual threshold")
     p_batch.add_argument("--method", default="otsu", choices=VALID_METHODS,
                          help="Threshold method")
+    p_batch.add_argument("--format", choices=["geojson", "shapefile"], default="geojson",
+                         help="Vector output format when --vector-dir is set "
+                              "(default: geojson). shapefile writes .shp + sidecars.")
     p_batch.add_argument("--json", action="store_true", help="Output statistics as JSON")
     p_batch.set_defaults(func=cmd_batch)
 
@@ -491,7 +756,7 @@ def main():
         sys.exit(1)
 
     try:
-        args.func(args)
+        return args.func(args)
     except ValueError as e:
         print(f"ERROR: {e}")
         sys.exit(1)
@@ -504,4 +769,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -9,6 +9,7 @@ import json
 import importlib.util
 
 import numpy as np
+import rasterio
 
 # Load the script module (filename has hyphen, so use importlib)
 SCRIPT_PATH = os.path.join(os.path.dirname(__file__), "..", "scripts", "water-body-extraction.py")
@@ -116,6 +117,110 @@ class TestCLI(unittest.TestCase):
         """Verify --help doesn't crash."""
         parser = wbe.build_parser()
         self.assertIsNotNone(parser)
+
+
+class TestFormatFlag(unittest.TestCase):
+    """Tests for the --format (geojson / shapefile) flag on the vector output."""
+
+    def setUp(self):
+        import tempfile
+        self.tmpdir = tempfile.mkdtemp(prefix="wbe_fmt_")
+        # Make a tiny synthetic mask with a single water polygon
+        self.mask = np.zeros((20, 20), dtype=np.uint8)
+        self.mask[5:15, 5:15] = 1
+        self.transform = rasterio.Affine(0.001, 0.0, 116.0, 0.0, -0.001, 40.0)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_vector_driver_geojson(self):
+        self.assertEqual(wbe._vector_driver("geojson"), "GeoJSON")
+        self.assertEqual(wbe._vector_driver("GeoJSON"), "GeoJSON")
+
+    def test_vector_driver_shapefile(self):
+        self.assertEqual(wbe._vector_driver("shapefile"), "ESRI Shapefile")
+
+    def test_vector_driver_invalid_raises(self):
+        with self.assertRaises(ValueError):
+            wbe._vector_driver("kml")
+
+    def test_vectorize_mask_geojson(self):
+        import fiona
+        out = os.path.join(self.tmpdir, "water.json")
+        stats = wbe.vectorize_mask(self.mask, self.transform, "EPSG:4326", out,
+                                    fmt="geojson")
+        # Path should have .geojson extension
+        self.assertTrue(os.path.exists(stats["output"]))
+        self.assertTrue(stats["output"].endswith(".geojson"))
+        # GeoJSON is a single file
+        self.assertEqual(stats["vector_features"], 1)
+        self.assertEqual(stats["vector_format"], "geojson")
+        with fiona.open(stats["output"]) as src:
+            self.assertEqual(src.driver, "GeoJSON")
+            self.assertEqual(len(src), 1)
+
+    def test_vectorize_mask_shapefile(self):
+        import fiona
+        out = os.path.join(self.tmpdir, "water")
+        stats = wbe.vectorize_mask(self.mask, self.transform, "EPSG:4326", out,
+                                    fmt="shapefile")
+        # Path should have .shp extension
+        self.assertTrue(os.path.exists(stats["output"]))
+        self.assertTrue(stats["output"].endswith(".shp"))
+        # Shapefile produces several sidecar files
+        sidecars = [".shp", ".shx", ".dbf"]
+        for ext in sidecars:
+            self.assertTrue(
+                os.path.exists(stats["output"][:-4] + ext),
+                f"missing sidecar: {ext}",
+            )
+        self.assertEqual(stats["vector_features"], 1)
+        self.assertEqual(stats["vector_format"], "shapefile")
+        with fiona.open(stats["output"]) as src:
+            self.assertEqual(src.driver, "ESRI Shapefile")
+            self.assertEqual(len(src), 1)
+
+    def test_vectorize_mask_preserves_explicit_geojson_ext(self):
+        out = os.path.join(self.tmpdir, "explicit.geojson")
+        stats = wbe.vectorize_mask(self.mask, self.transform, "EPSG:4326", out,
+                                    fmt="geojson")
+        self.assertEqual(stats["output"], out)
+
+    def test_extract_help_lists_format(self):
+        import subprocess
+        out = subprocess.run(
+            [sys.executable, SCRIPT_PATH, "extract", "--help"],
+            capture_output=True, text=True, timeout=10,
+        )
+        text = out.stdout + out.stderr
+        self.assertIn("--format", text)
+        self.assertIn("geojson", text)
+        self.assertIn("shapefile", text)
+
+    def test_batch_help_lists_format(self):
+        import subprocess
+        out = subprocess.run(
+            [sys.executable, SCRIPT_PATH, "batch", "--help"],
+            capture_output=True, text=True, timeout=10,
+        )
+        text = out.stdout + out.stderr
+        self.assertIn("--format", text)
+
+    def test_format_default_is_geojson(self):
+        parser = wbe.build_parser()
+        args = parser.parse_args([
+            "extract", "-i", "x.tif", "--vector", "v.json",
+        ])
+        self.assertEqual(args.format, "geojson")
+
+    def test_format_shapefile_choice(self):
+        parser = wbe.build_parser()
+        args = parser.parse_args([
+            "extract", "-i", "x.tif", "--vector", "v",
+            "--format", "shapefile",
+        ])
+        self.assertEqual(args.format, "shapefile")
 
 
 if __name__ == "__main__":
