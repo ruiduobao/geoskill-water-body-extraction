@@ -1,6 +1,6 @@
 ---
 name: water-body-extraction
-description: 'Automatic water body extraction from multi-band satellite imagery using description: 'Automatic water body extraction from multi-band satellite imagery using NDWI and MNDWI indices.  Supports Landsat 8/9 and Sentinel-2, Otsu threshold optimization, and vector output.  '
+description: 'Automatic water body extraction from multi-band satellite imagery using NDWI and MNDWI indices.  Supports Landsat 8/9 and Sentinel-2, Otsu threshold optimization, and vector output.  '
 ---
 
 # Water Body Extraction
